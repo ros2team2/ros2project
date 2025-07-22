@@ -1,0 +1,5 @@
+# 모델 폴더 무시
+/models/
+
+# pycache 폴더 무시
+/__pycache__/
