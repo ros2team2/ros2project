@@ -2,31 +2,48 @@ import os
 import sys
 import threading
 import pyaudio
+import json
+import socket
 from vosk import Model, KaldiRecognizer
-
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt, QSize
-
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton,
-    QTextEdit, QLabel, QHBoxLayout, QSizePolicy
-)
-
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QLabel
+import time
+import cv2
+from ultralytics import YOLO
 
 class VoiceRecognizer(QWidget):
     def __init__(self):
         super().__init__()
 
         self.setWindowTitle("VOSK 음성 인식기")
-        self.setFixedSize(400, 400)  # 창 크기 고정
+        self.setFixedSize(400, 400)
 
         self.init_ui()
 
-        # 음성 인식 관련 변수
-        self.model_path = "models/vosk-model-en-us-0.42-gigaspeech"
+        # 음성 인식 설정
+        self.model_path = os.path.join(os.path.dirname(__file__), "models/vosk-model-en-us-0.42-gigaspeech")
+        self.yolo = YOLO(os.path.join(os.path.dirname(__file__), "models/best.onnx"))
         self.sample_rate = 8000
         self.chunk_size = 1024
         self.running = False
+
+        # TCP 클라이언트 설정
+        self.server_host = "192.168.0.95"  # 실제 Linux 서버 IP로 변경
+        self.server_port = 12345
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                self.client_socket.connect((self.server_host, self.server_port))
+                print(f"Connected to server at {self.server_host}:{self.server_port}")
+                break
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {e}")
+                if attempt == max_attempts - 1:
+                    self.label.setText(f"❌ 서버 연결 실패: {e}")
+                    self.mic_button.setEnabled(False)
+                time.sleep(1)
 
         if not os.path.exists(self.model_path):
             self.label.setText("❌ 모델 경로가 존재하지 않습니다.")
@@ -39,19 +56,14 @@ class VoiceRecognizer(QWidget):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
 
-        self.label = QLabel("🎤 아래 버튼을 눌러 음성 인식을 시작하세요.")
+        self.label = QLabel("아래 버튼을 눌러 음성 인식을 시작하세요.")
         self.label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.label)
 
-        self.text_edit = QTextEdit()
-        self.text_edit.setReadOnly(True)
-        layout.addWidget(self.text_edit)
-
-        # 마이크 버튼 (중앙 배치)
         self.mic_button = QPushButton()
         self.mic_button.setIcon(QIcon.fromTheme("microphone"))
         self.mic_button.setText("마이크")
-        self.mic_button.setIconSize(QSize(24, 24))
+        self.mic_button.setIconSize(QSize(50, 50))
         self.mic_button.setFixedHeight(40)
         self.mic_button.clicked.connect(self.toggle_recognition)
         self.mic_button.setStyleSheet("""
@@ -69,6 +81,11 @@ class VoiceRecognizer(QWidget):
         """)
         layout.addWidget(self.mic_button, alignment=Qt.AlignCenter)
 
+        self.result_label = QLabel("")
+        self.result_label.setAlignment(Qt.AlignCenter)
+        self.result_label.setStyleSheet("color: green; font-size: 16px;")
+        layout.addWidget(self.result_label)
+
         self.setLayout(layout)
 
     def toggle_recognition(self):
@@ -81,7 +98,7 @@ class VoiceRecognizer(QWidget):
         self.running = True
         self.mic_button.setText(" 🔇 중지")
         self.label.setText("🟢 음성 인식 중... 마이크에 말하세요.")
-        self.text_edit.clear()
+        self.result_label.setText("")
 
         self.thread = threading.Thread(target=self.recognize)
         self.thread.start()
@@ -105,17 +122,72 @@ class VoiceRecognizer(QWidget):
             while self.running:
                 data = stream.read(self.chunk_size, exception_on_overflow=False)
                 if self.rec.AcceptWaveform(data):
-                    result = self.rec.Result()
-                    text = eval(result)["text"]
-                    if text.strip():
-                        self.text_edit.append(f"{text}")
+                    result_json = self.rec.Result()
+                    result_dict = json.loads(result_json)
+                    self.text_process(result_dict.get("text", ""))
         except Exception as e:
-            self.text_edit.append(f"❗ 오류 발생: {e}")
+            print(f"오류 발생: {e}")
+            self.result_label.setText(f"오류: {e}")
         finally:
             stream.stop_stream()
             stream.close()
             p.terminate()
 
+    def text_process(self, text):
+        print(f"인식된 텍스트: {text}")
+        token = text.split()
+        for word in token:
+            if word in ["boogie", "cookie", "pookie", "ookie"]:
+                self.result_label.setText("지금 바로 갑니다. 주인님!")
+                emotion_data = self.yolo_emotion_detection()
+                if emotion_data:
+                    try:
+                        # JSON 문자열로 감정 데이터 직렬화
+                        emotion_json = json.dumps(emotion_data)
+                        self.client_socket.send(emotion_json.encode('utf-8'))
+                        print(f"감정 전송: {emotion_json}")
+                    except Exception as e:
+                        print(f"감정 전송 실패: {e}")
+                        self.result_label.setText(f"전송 실패: {e}")
+                self.stop_recognition()
+                return
+        self.result_label.setText("")
+
+    def yolo_emotion_detection(self):
+        cap = cv2.VideoCapture(0)
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame.")
+            self.result_label.setText("카메라 프레임 캡처 실패")
+            cap.release()
+            return None
+
+        gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_image_3d = cv2.merge([gray_image, gray_image, gray_image])
+
+        results = self.yolo(gray_image_3d)
+        result = results[0]
+
+        emotion_data = None
+        for box in result.boxes:
+            conf = float(box.conf[0])
+            class_id = int(box.cls[0])
+            class_name = self.yolo.names[class_id]
+            # JSON 형식으로 감정 데이터 구성
+            emotion_data = {
+                "emotion": class_name,
+                "confidence": conf
+            }
+            self.result_label.setText(f"감정: {class_name}, 정확도: {conf:.2f}")
+            break  # 첫 번째 감정만 처리
+
+        cap.release()
+        return emotion_data
+
+    def closeEvent(self, event):
+        self.running = False
+        self.client_socket.close()
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
