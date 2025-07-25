@@ -16,7 +16,7 @@ class VoiceRecognizer(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("VOSK 음성 인식기")
+        self.setWindowTitle("당신의 친구 BOOGIE")
         self.setFixedSize(400, 400)
 
         self.init_ui()
@@ -29,7 +29,7 @@ class VoiceRecognizer(QWidget):
         self.running = False
 
         # TCP 클라이언트 설정
-        self.server_host = "192.168.0.95"  # 실제 Linux 서버 IP로 변경
+        self.server_host = "192.168.0.95"  # 실제 서버 IP
         self.server_port = 12345
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         max_attempts = 3
@@ -41,12 +41,12 @@ class VoiceRecognizer(QWidget):
             except Exception as e:
                 print(f"Attempt {attempt + 1} failed: {e}")
                 if attempt == max_attempts - 1:
-                    self.label.setText(f"❌ 서버 연결 실패: {e}")
+                    self.label.setText(f"서버 연결 실패: {e}")
                     self.mic_button.setEnabled(False)
                 time.sleep(1)
 
         if not os.path.exists(self.model_path):
-            self.label.setText("❌ 모델 경로가 존재하지 않습니다.")
+            self.label.setText("모델 경로가 존재하지 않습니다.")
             self.mic_button.setEnabled(False)
         else:
             self.model = Model(self.model_path)
@@ -96,17 +96,28 @@ class VoiceRecognizer(QWidget):
 
     def start_recognition(self):
         self.running = True
-        self.mic_button.setText(" 🔇 중지")
-        self.label.setText("🟢 음성 인식 중... 마이크에 말하세요.")
+        self.mic_button.setText("중지")
+        self.label.setText("음성 인식 중... 마이크에 말하세요.")
         self.result_label.setText("")
+        
+        # 서버에 음성 인식 시작 신호 전송
+        try:
+            self.client_socket.send(json.dumps({"command": "start_recognition"}).encode('utf-8'))
+            print("Sent start_recognition signal")
+        except Exception as e:
+            print(f"Failed to send start_recognition signal: {e}")
+            self.label.setText(f"신호 전송 실패: {e}")
+            self.running = False
+            self.mic_button.setText("🎙️")
+            return
 
         self.thread = threading.Thread(target=self.recognize)
         self.thread.start()
 
     def stop_recognition(self):
         self.running = False
-        self.mic_button.setText(" 음성 인식 시작")
-        self.label.setText("⏹️ 음성 인식이 중지되었습니다.")
+        self.mic_button.setText("마이크")
+        self.label.setText("음성 인식이 중지되었습니다.")
 
     def recognize(self):
         p = pyaudio.PyAudio()
@@ -138,14 +149,18 @@ class VoiceRecognizer(QWidget):
         token = text.split()
         for word in token:
             if word in ["boogie", "cookie", "pookie", "ookie"]:
-                self.result_label.setText("지금 바로 갑니다. 주인님!")
+                self.result_label.setText("주인님 오늘의 느낌은?")
                 emotion_data = self.yolo_emotion_detection()
                 if emotion_data:
                     try:
-                        # JSON 문자열로 감정 데이터 직렬화
+                        # 감정 데이터 전송
                         emotion_json = json.dumps(emotion_data)
                         self.client_socket.send(emotion_json.encode('utf-8'))
                         print(f"감정 전송: {emotion_json}")
+                        # 감정 전송 후 종료 신호 전송
+                        time.sleep(0.1)  # 짧은 지연
+                        self.client_socket.send(json.dumps({"command": "end_recognition"}).encode('utf-8'))
+                        print("Sent end_recognition signal")
                     except Exception as e:
                         print(f"감정 전송 실패: {e}")
                         self.result_label.setText(f"전송 실패: {e}")
@@ -173,19 +188,29 @@ class VoiceRecognizer(QWidget):
             conf = float(box.conf[0])
             class_id = int(box.cls[0])
             class_name = self.yolo.names[class_id]
-            # JSON 형식으로 감정 데이터 구성
             emotion_data = {
                 "emotion": class_name,
                 "confidence": conf
             }
-            self.result_label.setText(f"감정: {class_name}, 정확도: {conf:.2f}")
-            break  # 첫 번째 감정만 처리
+            if class_name == "Sad":
+                self.result_label.setText("너무 슬픈 표정 짓지 말아주세요.")
+            elif class_name == "Happy":
+                self.result_label.setText("오늘도 화이팅입니다.")
+            elif class_name == "Neutral":
+                self.result_label.setText("웃어보면 어떨까요???")
+
+            break
 
         cap.release()
         return emotion_data
 
     def closeEvent(self, event):
         self.running = False
+        try:
+            self.client_socket.send(json.dumps({"command": "end_recognition"}).encode('utf-8'))
+            print("Sent end_recognition signal on close")
+        except:
+            pass
         self.client_socket.close()
         event.accept()
 

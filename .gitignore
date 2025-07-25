@@ -1,5 +1,5 @@
 # 모델 폴더 무시
-/models/
+animal_robot_project/models/
 
 # pycache 폴더 무시
-/__pycache__/
+__pycache__/
